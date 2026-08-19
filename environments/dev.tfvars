@@ -1,0 +1,7 @@
+project_name   = "my-static-site"
+environment    = "dev"
+aws_region     = "us-east-1"
+domain_name    = "dev.example.com"
+hosted_zone_id = "ZXXXXXXXXXXXXXXXXX"
+github_org     = "your-org"
+github_repo    = "your-repo"

@@ -1,0 +1,16 @@
+# Terraform state and working files
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+tfplan
+*.tfplan
+
+# Backend config (contains bucket names — commit backend.hcl.example instead)
+backend.hcl
+
+# Local variable overrides
+*.auto.tfvars
+
+# macOS
+.DS_Store

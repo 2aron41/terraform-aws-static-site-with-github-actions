@@ -1,0 +1,12 @@
+# Copy to backend.hcl and fill in your values.
+# Pass to terraform init:  terraform init -backend-config=backend.hcl
+#
+# The S3 bucket and DynamoDB table must exist before running init.
+# See environments/bootstrap/ (added in a later commit) for the one-time
+# bootstrap resources.
+
+bucket         = "my-tfstate-bucket"
+key            = "static-site/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "terraform-state-lock"
+encrypt        = true
