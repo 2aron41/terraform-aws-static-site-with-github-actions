@@ -1,6 +1,6 @@
 # Terraform AWS Static Site With GitHub Actions
 
-> Status: foundation — Terraform module wired, GitHub Actions CI/CD not yet added.
+Pull requests check Terraform formatting and validity. A manual GitHub Actions workflow publishes the demo page to S3 and invalidates CloudFront.
 
 Terraform module that provisions a production-grade static site on AWS:
 S3 origin behind a CloudFront distribution with a custom ACM-issued TLS certificate,
@@ -39,7 +39,9 @@ policy allows only the distribution's service principal.
 ├── outputs.tf                  # Root outputs (CloudFront URL, bucket name, role ARN)
 ├── versions.tf                 # Provider requirements and backend block
 ├── backend.hcl.example         # Template for -backend-config at init
-├── Makefile                    # Shortcuts: init, plan, apply, destroy
+├── Makefile                    # Terraform shortcuts
+├── .github/workflows/          # Pull request checks and manual site deployment
+├── site/index.html             # Demo page served by CloudFront
 ├── environments/
 │   ├── dev.tfvars
 │   └── prod.tfvars
@@ -62,11 +64,12 @@ policy allows only the distribution's service principal.
 
 ### 1. Create the OIDC provider (one-time per account)
 
+If the AWS account already has the GitHub OIDC provider, use that provider. Otherwise, create it with the AWS CLI. [AWS IAM OIDC provider documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html)
+
 ```bash
 aws iam create-open-id-connect-provider \
   --url https://token.actions.githubusercontent.com \
-  --client-id-list sts.amazonaws.com \
-  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+  --client-id-list sts.amazonaws.com
 ```
 
 ### 2. Bootstrap remote state
@@ -77,6 +80,7 @@ Create the S3 bucket and DynamoDB table for Terraform state before the first `in
 aws s3api create-bucket --bucket my-tfstate-bucket --region us-east-1
 aws s3api put-bucket-versioning \
   --bucket my-tfstate-bucket \
+  --region us-east-1 \
   --versioning-configuration Status=Enabled
 aws dynamodb create-table \
   --table-name terraform-state-lock \
@@ -93,7 +97,9 @@ cp backend.hcl.example backend.hcl
 # Edit backend.hcl — fill in your bucket name, key, and region
 ```
 
-### 4. Deploy
+### 4. Provision the site infrastructure
+
+For a new deployment, edit `environments/dev.tfvars`. Set `project_name` so the resulting S3 bucket name is globally unique. Set `domain_name` and `hosted_zone_id` to your domain and its public Route 53 hosted zone. Set `github_org` and `github_repo` to the owner and name of the repository that will run the workflow. Use the same account as the OIDC provider. If the site infrastructure is already provisioned, initialize the existing backend and select its workspace to read the outputs.
 
 ```bash
 make init ENV=dev
@@ -133,16 +139,49 @@ The deploy role's trust policy is scoped to one repository:
 The `sub` wildcard allows any ref (branch, tag, PR) in that repository.
 To lock it further to `refs/heads/main` only, replace `*` with `ref:refs/heads/main`.
 
-Only one secret lives in GitHub: `DEPLOY_ROLE_ARN` — the ARN output from `terraform apply`.
-No AWS access key ID, no secret access key.
+## Verify pull request checks
 
-## Forking and Deploying
+Every pull request runs **Terraform format and validate**. To run the same commands locally, use Terraform 1.9.8 from `.terraform-version` and a fresh checkout so the local working directory starts without remote backend metadata.
 
-1. Fork this repository.
-2. Follow the setup steps above with your own domain and AWS account.
-3. Add `DEPLOY_ROLE_ARN` as a repository secret in GitHub settings.
-4. Push a commit — the GitHub Actions workflow (added in a later commit) runs plan on
-   PRs and apply on merge to main.
+```bash
+terraform fmt -check -recursive
+terraform init -backend=false -input=false
+make validate
+```
+
+Initialization downloads the AWS provider. It skips the remote backend, and all three commands can run without AWS credentials.
+
+## Configure and run the demo deployment
+
+1. From the initialized Terraform checkout, select the workspace for the site you want to publish to. Read all the deployment outputs from that workspace.
+
+   ```bash
+   terraform workspace select dev
+   terraform output -raw deploy_role_arn
+   terraform output -raw s3_bucket_name
+   terraform output -raw cloudfront_distribution_id
+   terraform output -raw cloudfront_domain_name
+   ```
+
+2. In the GitHub repository, open **Settings → Secrets and variables → Actions**. Add these repository settings using values from the same workspace.
+
+   | Kind | Name | Value |
+   | --- | --- | --- |
+   | Secret | `DEPLOY_ROLE_ARN` | `terraform output -raw deploy_role_arn` |
+   | Variable | `SITE_BUCKET` | `terraform output -raw s3_bucket_name` |
+   | Variable | `CLOUDFRONT_DISTRIBUTION_ID` | `terraform output -raw cloudfront_distribution_id` |
+   | Variable | `AWS_REGION` | The site bucket's region, set by `aws_region` in the workspace's tfvars file |
+
+3. Once the workflow is on `main`, open **Actions → Deploy demo site → Run workflow**, select `main`, and click **Run workflow**. The workflow uses temporary credentials from the deploy role, writes `site/index.html` to the bucket's `index.html` key, and waits for invalidation of `/` and `/index.html`. This replaces the current homepage in the configured bucket.
+4. Check that **Upload demo page** and **Invalidate CloudFront and wait** both succeeded. From a checkout of the deployed revision, verify the CloudFront root and explicit page URL return the committed file. Run this from the initialized Terraform checkout for the same workspace.
+
+   ```bash
+   CLOUDFRONT_URL="https://$(terraform output -raw cloudfront_domain_name)"
+   curl --fail --silent --show-error "$CLOUDFRONT_URL/" | diff -u site/index.html -
+   curl --fail --silent --show-error "$CLOUDFRONT_URL/index.html" | diff -u site/index.html -
+   ```
+
+   Both comparisons should exit successfully with no diff. Once DNS resolves, repeat the root request using the custom domain from your tfvars file.
 
 ## Teardown
 
@@ -150,6 +189,4 @@ No AWS access key ID, no secret access key.
 make destroy ENV=dev
 ```
 
-`s3_force_destroy = true` in `dev.tfvars` allows destroy to empty the bucket.
-In prod, set `s3_force_destroy = false` (the default) so the bucket refuses
-destroy unless empty, preventing accidental data loss.
+The root module uses the static-site module's default `s3_force_destroy = false`. Empty the bucket, including object versions and delete markers, before destroying the site.

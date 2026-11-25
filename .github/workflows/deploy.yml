@@ -1,0 +1,48 @@
+name: Deploy demo site
+
+on: workflow_dispatch
+
+permissions: {}
+
+concurrency:
+  group: deploy-demo-site
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DEPLOY_ROLE_ARN: ${{ secrets.DEPLOY_ROLE_ARN }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      SITE_BUCKET: ${{ vars.SITE_BUCKET }}
+      CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check deployment settings
+        run: |
+          : "${DEPLOY_ROLE_ARN:?Set the DEPLOY_ROLE_ARN repository secret}"
+          : "${AWS_REGION:?Set the AWS_REGION repository variable}"
+          : "${SITE_BUCKET:?Set the SITE_BUCKET repository variable}"
+          : "${CLOUDFRONT_DISTRIBUTION_ID:?Set the CLOUDFRONT_DISTRIBUTION_ID repository variable}"
+      - name: Assume Terraform deploy role
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Upload demo page
+        run: aws s3 cp site/index.html "s3://${SITE_BUCKET}/index.html" --content-type text/html
+      - name: Invalidate CloudFront and wait
+        run: |
+          invalidation_id=$(aws cloudfront create-invalidation \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+            --paths "/" "/index.html" \
+            --query 'Invalidation.Id' --output text)
+          echo "Waiting for CloudFront invalidation $invalidation_id"
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --id "$invalidation_id"
